@@ -601,7 +601,10 @@ class Bandit:
     def weight(self, key: str) -> float:
         d = self._slot(key)
         mean = d["a"]/(d["a"]+d["b"])
-        return 0.3 + 0.7*mean
+        # incorporate decayed weight factor `w` so that recent performance
+        # influences the bandit's decision. previously `w` was updated but
+        # never used, rendering `decay_weights` ineffective.
+        return (0.3 + 0.7*mean) * d.get("w", 1.0)
 
     def update(self, key: str, result: str):
         d = self._slot(key)
@@ -1216,3 +1219,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
