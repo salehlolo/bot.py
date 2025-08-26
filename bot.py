@@ -12,7 +12,7 @@ Env:
   (اختياري) CRYPTOPANIC_TOKEN, NEWSAPI_KEY  ← تقدر تسيبهم فاضيين
 """
 
-import os, time, json, argparse, datetime as dt, random, math
+import os, time, json, argparse, datetime as dt, random, math, csv
 from dataclasses import dataclass, asdict
 from typing import Optional, Tuple, List, Dict, Callable
 
@@ -895,6 +895,30 @@ class Bot:
         ensure_dir(self.cfg.state_json)
         with open(self.cfg.state_json,"w",encoding="utf-8") as f: json.dump(self.state, f, ensure_ascii=False, indent=2)
 
+    def update_params_from_stats(self, stats: Dict[str, float]):
+        """Update Config parameters from performance stats and log changes."""
+        history_path = os.path.join(self.cfg.logs_dir, "params_history.csv")
+        ensure_dir(history_path)
+        if not os.path.exists(history_path):
+            with open(history_path, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerow(["timestamp", "param", "old", "new"])
+        changes: List[List[str]] = []
+        for k, v in stats.items():
+            if not hasattr(self.cfg, k):
+                continue
+            old = getattr(self.cfg, k)
+            try:
+                new = type(old)(v)
+            except Exception:
+                new = v
+            if old == new:
+                continue
+            setattr(self.cfg, k, new)
+            changes.append([fmt_ts(), k, old, new])
+        if changes:
+            with open(history_path, "a", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerows(changes)
+
     # ===== أدوات إدارة المخاطر الإضافية =====
 
     def _cooldown_active(self) -> bool:
@@ -926,6 +950,14 @@ class Bot:
             r["daily_pnl"] = 0.0
             r["daily_stopped"] = False
             self._save_state()
+            stats_path = os.path.join(self.cfg.logs_dir, "performance.json")
+            if os.path.exists(stats_path):
+                try:
+                    with open(stats_path, "r", encoding="utf-8") as f:
+                        stats = json.load(f)
+                    self.update_params_from_stats(stats)
+                except Exception as e:
+                    self.notifier.send(f"[WARN] update params failed: {e}")
 
     def _daily_stop_active(self) -> bool:
         r = self.state.setdefault("risk", {})
