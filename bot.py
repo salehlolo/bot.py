@@ -589,31 +589,49 @@ def apply_mutated_signal(row: pd.Series, base_name: str, params: Dict[str,float]
 def ctx_key(regime: Regime) -> str:
     return f"{regime.trend}|{regime.vol_bucket}"
 
-class Bandit:
-    def __init__(self, state: dict):
-        self.s = state.setdefault("bandit", {})
+class WeightedBandit:
+    """Simple weighted bandit storing rewards per strategy"""
+    def __init__(self, path: str):
+        self.path = path
+        try:
+            with open(self.path, "r") as f:
+                self.s = json.load(f)
+        except Exception:
+            self.s = {}
 
-    def _slot(self, key: str) -> Dict[str,float]:
-        d = self.s.setdefault(key, {"a":1.0,"b":1.0,"w":1.0})
-        if "w" not in d: d["w"]=1.0
-        return d
+    def _slot(self, key: str) -> Dict[str, float]:
+        return self.s.setdefault(key, {"reward_sum": 0.0, "count": 0})
+
+    def save(self):
+        ensure_dir(self.path)
+        with open(self.path, "w") as f:
+            json.dump(self.s, f)
 
     def weight(self, key: str) -> float:
         d = self._slot(key)
-        mean = d["a"]/(d["a"]+d["b"])
-        # incorporate decayed weight factor `w` so that recent performance
-        # influences the bandit's decision. previously `w` was updated but
-        # never used, rendering `decay_weights` ineffective.
-        return (0.3 + 0.7*mean) * d.get("w", 1.0)
+        if d["count"] == 0:
+            return 1.0
+        avg = d["reward_sum"] / d["count"]
+        return max(0.0, 1.0 + avg)
 
-    def update(self, key: str, result: str):
+    def update(self, key: str, reward: float):
         d = self._slot(key)
-        if result == "tp": d["a"] += 1.0
-        else: d["b"] += 1.0
+        d["reward_sum"] += reward
+        d["count"] += 1
+        self.save()
+
+    def select(self, strategies: List[str]) -> str:
+        if not strategies:
+            raise ValueError("no strategies provided")
+        weights = [self.weight(s) for s in strategies]
+        if sum(weights) <= 0:
+            return random.choice(strategies)
+        return random.choices(strategies, weights=weights, k=1)[0]
 
     def decay_weights(self, factor: float = 0.995):
-        for k in list(self.s.keys()):
-            self.s[k]["w"] = max(0.1, self.s[k].get("w",1.0) * factor)
+        for d in self.s.values():
+            d["reward_sum"] *= factor
+        self.save()
 
 # =========================
 # Paper Engine
@@ -870,7 +888,7 @@ class Bot:
         self.symbols: List[str] = self.ex.filter_healthy(base_universe)
         self.news = NewsGuard(cfg)
         self.state = self._load_state()
-        self.bandit = Bandit(self.state)
+        self.bandit = WeightedBandit(os.path.join(cfg.logs_dir, "bandit_state.json"))
         self.last_key: Dict[str, Optional[str]] = {}
         self.last_time: Dict[str, Optional[dt.datetime]] = {}
         self.last_alert_ts: float = 0.0
@@ -964,6 +982,7 @@ class Bot:
         - Confidence Filter: فلترة بالثقة (cfg.min_confidence_accept)
         """
         base = self._all_generators()
+        base_map = dict(base)
         candidates: List[Signal] = []
 
         # مرشحين أساسيين
@@ -978,7 +997,8 @@ class Bot:
         mutated_meta: List[Tuple[str, Signal, float]] = []
         if self.cfg.evolve_enabled:
             for _ in range(self.cfg.evolve_mutations_per_round):
-                base_name, fn = random.choice(base)
+                base_name = self.bandit.select(list(base_map.keys()))
+                fn = base_map[base_name]
                 params = mutate_params(self.cfg)
                 s = apply_mutated_signal(row, base_name, params, self.cfg)
                 if s:
@@ -994,8 +1014,7 @@ class Bot:
 
         # نحسب أوزان/درجات التصويت + نعد المتفقين من الأساسيين فقط للـ Override
         for s in candidates:
-            key = f"{symbol}|{ctx_key(regime)}|{s.model}"
-            w = self.bandit.weight(key)
+            w = self.bandit.weight(s.model)
             sc = w * (0.5 + 0.5*s.confidence)
             totals[s.side] += sc
             details.append((s.model, s.side, sc, w, s.confidence))
@@ -1003,8 +1022,7 @@ class Bot:
 
         # المتحورات: تؤثر على السكور فقط (وليس عدّ الاتفاق الأدنى)
         for tag, s, trial_w in mutated_meta:
-            key = f"{symbol}|{ctx_key(regime)}|{tag}"
-            w = self.bandit.weight(key) * trial_w
+            w = self.bandit.weight(tag) * trial_w
             sc = w * (0.5 + 0.5*s.confidence)
             totals[s.side] += sc
             details.append((tag, s.side, sc, w, s.confidence))
@@ -1083,8 +1101,8 @@ class Bot:
                     pnl_sum = 0.0
                     sl_count = 0
                     for t in closed:
-                        key = f"{t.symbol}|{ctx}|{t.model}"
-                        self.bandit.update(key, t.result)
+                        reward = float(t.pnl_usd or 0.0) / self.ref_equity
+                        self.bandit.update(t.model, reward)
                         pnl_sum += float(t.pnl_usd or 0.0)
                         if t.result == "sl": sl_count += 1
                         emoji = "✅" if t.result=="tp" else "❌"
