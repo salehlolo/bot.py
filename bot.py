@@ -3,13 +3,13 @@
 
 """
 bot.py — Triple+3 Strategies (Self-Evolving) Scalper — OKX USDT Swap
-(نسخة بدون أي تكامل مع OpenAI — تداول/إشعارات فقط)
-
+(نسخة بدون أي تكامل مع OpenAI — تداول/إشعارات فقط)␊
+␊
 تشغيل تجريبي على بيئة الديمو الخاصة بـOKX.
-Env:
+Env:␊
   OKX_API_KEY, OKX_API_SECRET, OKX_API_PASSWORD
-  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-  (اختياري) CRYPTOPANIC_TOKEN, NEWSAPI_KEY  ← تقدر تسيبهم فاضيين
+  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID␊
+  (اختياري) CRYPTOPANIC_TOKEN, NEWSAPI_KEY  ← تقدر تسيبهم فاضيين␊
 """
 
 import os, time, json, argparse, datetime as dt, random, math
@@ -211,7 +211,17 @@ class FuturesExchange:
             "apiKey": key,
             "secret": secret,
             "password": password,
-
+            # Use swap markets in OKX demo environment
+            "options": {
+                "defaultType": "swap",
+                "demo": True,
+            },
+            "headers": {"x-simulated-trading": "1"},
+            "enableRateLimit": True,
+            "timeout": 15000,
+        })
+        # Demo accounts cannot access the private currencies endpoint; disable it
+        self.x.has["fetchCurrencies"] = False
         self.x.load_markets()
         self.cfg = cfg
         self._universe_cache: Dict[str, any] = {"ts": 0.0, "symbols": []}
@@ -240,6 +250,13 @@ class FuturesExchange:
             return float(bal["total"].get("USDT", 0.0))
         except Exception:
             return 0.0
+
+    def create_demo_order(self, symbol: str, side: str, amount: float):
+        try:
+            return self.x.create_order(symbol, "market", side, amount, None, {"tdMode": "cross"})
+        except Exception as e:
+            print("[WARN] create_order failed:", e)
+            return None
 
     def create_demo_order(self, symbol: str, side: str, amount: float):
         try:
@@ -1201,8 +1218,6 @@ class Bot:
 
                 self.paper.log_signal(symbol, row, sig, qty_ref, notional_ref, rr, self.cfg, regime)
                 t = self.paper.open_virtual(symbol, price, sig, self.cfg)
-                self.paper.ml_snapshot(t.id, symbol, row, regime)
-
                 self.last_key[symbol] = key
                 self.last_time[symbol] = now_utc()
                 self._save_state()
@@ -1244,4 +1259,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
