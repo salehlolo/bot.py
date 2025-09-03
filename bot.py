@@ -211,10 +211,7 @@ class FuturesExchange:
             "apiKey": key,
             "secret": secret,
             "password": password,
-            "options": {"defaultType": "swap", "demo": True},
-            "enableRateLimit": True,
-            "timeout": 15000,
-        })
+
         self.x.load_markets()
         self.cfg = cfg
         self._universe_cache: Dict[str, any] = {"ts": 0.0, "symbols": []}
