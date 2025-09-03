@@ -211,7 +211,8 @@ class FuturesExchange:
             "apiKey": key,
             "secret": secret,
             "password": password,
-            "options": {"defaultType": "swap"},
+            # Use swap markets in OKX demo environment
+            "options": {"defaultType": "swap", "demo": True},
             "headers": {"x-simulated-trading": "1"},
             "enableRateLimit": True,
             "timeout": 15000,
