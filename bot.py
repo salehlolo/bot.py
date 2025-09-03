@@ -217,6 +217,8 @@ class FuturesExchange:
             "enableRateLimit": True,
             "timeout": 15000,
         })
+        # Force all requests to hit the demo environment
+        self.x.set_sandbox_mode(True)
         # Demo accounts cannot access the private currencies endpoint; disable it
         self.x.has["fetchCurrencies"] = False
         self.x.load_markets()
