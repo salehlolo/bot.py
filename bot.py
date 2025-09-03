@@ -2,12 +2,12 @@
 # -*- coding: utf-8 -*-
 
 """
-bot.py — Triple+3 Strategies (Self-Evolving) Scalper — Binance USDM, Alerts-Only
+bot.py — Triple+3 Strategies (Self-Evolving) Scalper — OKX USDT Swap
 (نسخة بدون أي تكامل مع OpenAI — تداول/إشعارات فقط)
 
-تعليمي فقط — لا ينفّذ أوامر تداول حقيقية (Paper Engine).
+تشغيل تجريبي على بيئة الديمو الخاصة بـOKX.
 Env:
-  BINANCE_API_KEY, BINANCE_API_SECRET
+  OKX_API_KEY, OKX_API_SECRET, OKX_API_PASSWORD
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
   (اختياري) CRYPTOPANIC_TOKEN, NEWSAPI_KEY  ← تقدر تسيبهم فاضيين
 """
@@ -204,14 +204,24 @@ class Notifier:
 
 class FuturesExchange:
     def __init__(self, cfg: Config):
-        key = os.getenv("BINANCE_API_KEY")
-        secret = os.getenv("BINANCE_API_SECRET")
-        self.x = ccxt.binanceusdm({
-            "apiKey": key, "secret": secret,
-            "options": {"defaultType": "future"},
+        key = os.getenv("OKX_API_KEY")
+        secret = os.getenv("OKX_API_SECRET")
+        password = os.getenv("OKX_API_PASSWORD") or os.getenv("OKX_API_PASSPHRASE")
+        self.x = ccxt.okx({
+            "apiKey": key,
+            "secret": secret,
+            "password": password,
+            # Use swap markets in OKX demo environment
+            "options": {
+                "defaultType": "swap",
+                "demo": True,
+            },
+            "headers": {"x-simulated-trading": "1"},
             "enableRateLimit": True,
-            "timeout": 15000
+            "timeout": 15000,
         })
+        # Demo accounts cannot access the private currencies endpoint; disable it
+        self.x.has["fetchCurrencies"] = False
         self.x.load_markets()
         self.cfg = cfg
         self._universe_cache: Dict[str, any] = {"ts": 0.0, "symbols": []}
@@ -229,18 +239,30 @@ class FuturesExchange:
 
     def fetch_funding_rate(self, symbol: str) -> Optional[float]:
         try:
-            m = self.x.market(symbol)
-            fr = self.x.fapiPublic_get_premiumindex({"symbol": m["id"]})
-            return safe_float(fr.get("lastFundingRate", None), default=None)
+            fr = self.x.fetch_funding_rate(symbol)
+            return safe_float(fr.get("fundingRate"))
         except Exception:
             return None
 
     def get_balance_usdt(self) -> float:
         try:
-            bal = self.x.fetch_balance(params={"type":"future"})
+            bal = self.x.fetch_balance(params={"type": "swap"})
             return float(bal["total"].get("USDT", 0.0))
         except Exception:
             return 0.0
+
+    def create_demo_order(self, symbol: str, side: str, amount: float):
+        params = {"tdMode": "cross", "posSide": "long" if side.lower() == "buy" else "short"}
+        try:
+            o = self.x.create_order(symbol, "market", side, amount, params=params)
+            oid = o.get("id") or o.get("orderId") or o.get("info", {}).get("ordId")
+            if not oid:
+                print("[WARN] create_order returned no id:", o)
+                return None
+            return o
+        except Exception as e:
+            print("[WARN] create_order failed:", e)
+            return None
 
     def get_top_symbols(self, n: int = 50) -> List[str]:
         nowt = time.time()
@@ -1176,6 +1198,8 @@ class Bot:
                 risk = abs(price - sig.sl); reward = abs(sig.tp - price)
                 rr = round(reward / risk, 2) if risk > 0 else None
 
+                order = self.ex.create_demo_order(symbol, sig.side, qty_ref)
+                status_line = "🚀 Executed on OKX Demo" if order else "⚠️ Execution failed on OKX Demo"
                 msg = (
                     f"📢 [EVOLVE-COMMITTEE - {sig.model}] New Signal\n\n"
                     f"📍 Pair: {symbol}\n"
@@ -1187,7 +1211,7 @@ class Bot:
                     f"📏 R:R = {rr if rr is not None else 'n/a'}\n\n"
                     f"🧠 Why: {sig.reason}\n"
                     f"📦 SizeRef: ~{qty_ref:.6f} ({notional_ref:.2f} USDT)\n"
-                    f"⚠️ Alert Only – No Auto Execution"
+                    f"{status_line}"
                 )
                 self.notifier.send(msg)
                 self.last_alert_ts = time.time()
