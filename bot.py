@@ -161,9 +161,6 @@ class Config:
     # Committee Override: لازم أقل حاجة X نماذج تتفق على نفس الاتجاه
     committee_min_agree: int = 2
 
-    # Dynamic Cooldown (بالدقائق): خسارة 1→30، 2→60، 3+→180
-    cooldown_steps: Tuple[int, ...] = (30, 60, 180)
-
     # Daily Stop Loss: يوقف لباقي اليوم لو نزل -2% من رأس المال المرجعي
     daily_stop_enabled: bool = True
     daily_stop_pct: float = 0.02  # 2%
@@ -917,8 +914,6 @@ class Bot:
 
         # ==== إدارة المخاطر الإضافية (state) ====
         s = self.state.setdefault("risk", {})
-        s.setdefault("cooldown_until_ts", 0.0)   # وقت التهدئة حتى (UNIX ts)
-        s.setdefault("loss_streak", 0)           # خسائر متتالية
         s.setdefault("daily_date", now_utc().date().isoformat())
         s.setdefault("daily_pnl", 0.0)           # صافي اليوم
         s.setdefault("daily_stopped", False)     # تم تفعيل الوقف اليومي؟
@@ -936,27 +931,6 @@ class Bot:
         with open(self.cfg.state_json,"w",encoding="utf-8") as f: json.dump(self.state, f, ensure_ascii=False, indent=2)
 
     # ===== أدوات إدارة المخاطر الإضافية =====
-
-    def _cooldown_active(self) -> bool:
-        return time.time() < float(self.state.get("risk", {}).get("cooldown_until_ts", 0.0))
-
-    def _set_cooldown_after_loss(self):
-        r = self.state.setdefault("risk", {})
-        r["loss_streak"] = int(r.get("loss_streak", 0)) + 1
-        # اختر مدة التهدئة بناء على عدد الخسائر
-        idx = min(r["loss_streak"]-1, len(self.cfg.cooldown_steps)-1)
-        minutes = self.cfg.cooldown_steps[idx]
-        r["cooldown_until_ts"] = time.time() + minutes * 60
-        self._save_state()
-        self.notifier.send(f"⏳ Cooldown ON — خسائر متتالية: {r['loss_streak']} → إيقاف دخول صفقات لمدة {minutes} دقيقة")
-
-    def _reset_cooldown_on_win(self):
-        r = self.state.setdefault("risk", {})
-        if r.get("loss_streak", 0) > 0:
-            r["loss_streak"] = 0
-            r["cooldown_until_ts"] = 0.0
-            self._save_state()
-            self.notifier.send("✅ Cooldown RESET — تم تصفير الخسائر المتتالية")
 
     def _daily_rollover_if_needed(self):
         r = self.state.setdefault("risk", {})
@@ -1142,12 +1116,6 @@ class Bot:
                     self._save_state()
                     # وقّف يومي لو تعدى الحد
                     self._check_and_apply_daily_stop()
-                    # إدارة الستريك/التهدئة
-                    if sl_count > 0:
-                        self._set_cooldown_after_loss()
-                    else:
-                        self._reset_cooldown_on_win()
-
                     self.bandit.decay_weights(0.998)
                     self._save_state()
             except Exception:
@@ -1157,8 +1125,8 @@ class Bot:
         if len(self.paper.open) > 0:
             return
 
-        # لا تدخل صفقات جديدة لو في تهدئة أو وقف يومي
-        if self._cooldown_active() or self._daily_stop_active():
+        # لا تدخل صفقات جديدة لو في وقف يومي
+        if self._daily_stop_active():
             return
 
         # هدوء أحداث أو ثروتل
