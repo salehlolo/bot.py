@@ -211,14 +211,7 @@ class FuturesExchange:
             "apiKey": key,
             "secret": secret,
             "password": password,
-            # Use swap markets in OKX demo environment
-            "options": {"defaultType": "swap", "demo": True},
-            "headers": {"x-simulated-trading": "1"},
-            "enableRateLimit": True,
-            "timeout": 15000,
-        })
-        # Demo accounts cannot access the private currencies endpoint; disable it
-        self.x.options["fetchCurrencies"] = False
+
         self.x.load_markets()
         self.cfg = cfg
         self._universe_cache: Dict[str, any] = {"ts": 0.0, "symbols": []}
