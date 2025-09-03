@@ -215,12 +215,13 @@ class FuturesExchange:
             "options": {
                 "defaultType": "swap",
                 "demo": True,
-                "fetchCurrencies": False,  # private currencies endpoint unsupported in demo
             },
             "headers": {"x-simulated-trading": "1"},
             "enableRateLimit": True,
             "timeout": 15000,
         })
+        # Demo accounts cannot access the private currencies endpoint; disable it
+        self.x.has["fetchCurrencies"] = False
         self.x.load_markets()
         self.cfg = cfg
         self._universe_cache: Dict[str, any] = {"ts": 0.0, "symbols": []}
