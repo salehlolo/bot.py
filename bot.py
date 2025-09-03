@@ -1192,6 +1192,8 @@ class Bot:
                 risk = abs(price - sig.sl); reward = abs(sig.tp - price)
                 rr = round(reward / risk, 2) if risk > 0 else None
 
+                order = self.ex.create_demo_order(symbol, sig.side, qty_ref)
+                status_line = "🚀 Executed on OKX Demo" if order else "⚠️ Execution failed on OKX Demo"
                 msg = (
                     f"📢 [EVOLVE-COMMITTEE - {sig.model}] New Signal\n\n"
                     f"📍 Pair: {symbol}\n"
@@ -1203,9 +1205,8 @@ class Bot:
                     f"📏 R:R = {rr if rr is not None else 'n/a'}\n\n"
                     f"🧠 Why: {sig.reason}\n"
                     f"📦 SizeRef: ~{qty_ref:.6f} ({notional_ref:.2f} USDT)\n"
-                    f"🚀 Executed on OKX Demo"
+                    f"{status_line}"
                 )
-                self.ex.create_demo_order(symbol, sig.side, qty_ref)
                 self.notifier.send(msg)
                 self.last_alert_ts = time.time()
 
