@@ -33,7 +33,8 @@ import requests
 # Constants
 # =========================
 
-TRADE_VALUE_USD = 50.0
+# Each trade uses 50 USDT of margin at 10× leverage (~500 USDT notional)
+TRADE_MARGIN_USD = 50.0
 LEVERAGE = 10
 
 # =========================
@@ -1323,7 +1324,7 @@ class Bot:
                     if (now_utc() - self.last_time[symbol]).total_seconds()/60.0 < self.cfg.min_minutes_between_same_signal:
                         continue
 
-                base_qty = TRADE_VALUE_USD / price
+                base_qty = (TRADE_MARGIN_USD * LEVERAGE) / price
                 mkt = self.ex.x.market(symbol)
                 contract_size = float(mkt.get("contractSize") or 1)
                 contract_qty = base_qty / contract_size
