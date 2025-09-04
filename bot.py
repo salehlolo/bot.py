@@ -284,13 +284,17 @@ class FuturesExchange:
         except Exception as e:
             msg = str(getattr(e, 'args', [''])[0])
             if "59000" in msg:
-                print("[WARN] ensure account modes retrying after flatten (code 59000)")
+                print("[WARN] ensure account modes failed: open orders or positions exist; attempting to flatten")
                 self.flatten_all()
                 try:
-                    self.x.set_position_mode(not self.pos_mode.startswith("net"))
+                    self.x.set_position_mode(hedged)
                     self.x.set_leverage(self.leverage, setup_symbol, {"mgnMode": self.margin_mode})
                 except Exception as e2:
-                    print("[WARN] ensure account modes failed:", e2)
+                    msg2 = str(getattr(e2, 'args', [''])[0])
+                    if "59000" in msg2:
+                        print("[WARN] ensure account modes skipped: close orders/positions before changing modes (code 59000)")
+                    else:
+                        print("[WARN] ensure account modes failed:", e2)
             else:
                 print("[WARN] ensure account modes failed:", e)
 
@@ -322,14 +326,15 @@ class FuturesExchange:
         except Exception:
             return 0.0
 
-    def create_demo_order(self, symbol: str, side: str, amount: float, reduce_only: bool = False):
+    def create_demo_order(self, symbol: str, side: str, contract_amt: float, reduce_only: bool = False):
+        """Execute a market order in contract units on OKX."""
         params = {"tdMode": self.margin_mode, "reduceOnly": reduce_only}
         if not self.pos_mode.startswith("net"):
             params["posSide"] = "long" if side.lower() == "buy" else "short"
         if self.leverage:
             params["lever"] = str(self.leverage)
         try:
-            o = self.x.create_order(symbol, "market", side, amount, params=params)
+            o = self.x.create_order(symbol, "market", side, contract_amt, params=params)
             oid = o.get("id") or o.get("orderId") or o.get("info", {}).get("ordId")
             if not oid:
                 print("[WARN] create_order returned no id:", o)
@@ -339,9 +344,10 @@ class FuturesExchange:
             print("[WARN] create_order failed:", e)
             return None
 
-    def close_demo_position(self, symbol: str, orig_side: str, amount: float):
+    def close_demo_position(self, symbol: str, orig_side: str, contract_amt: float):
+        """Close an open position by sending the opposite order in contract units."""
         opp = "sell" if orig_side.lower() == "buy" else "buy"
-        return self.create_demo_order(symbol, opp, amount, reduce_only=True)
+        return self.create_demo_order(symbol, opp, contract_amt, reduce_only=True)
 
     def flatten_all(self):
         try:
@@ -1246,7 +1252,11 @@ class Bot:
                 closed = self.paper.update_with_candle(symbol, float(last["high"]), float(last["low"]))
                 if closed:
                     for t in closed:
-                        self.ex.close_demo_position(t.symbol, t.side, t.qty)
+                        mkt = self.ex.x.market(t.symbol)
+                        contract_size = float(mkt.get("contractSize") or 1)
+                        contract_qty = t.qty / contract_size
+                        contract_qty = float(self.ex.x.amount_to_precision(t.symbol, contract_qty))
+                        self.ex.close_demo_position(t.symbol, t.side, contract_qty)
                     reg_row = d.iloc[-2] if len(d)>1 else last
                     regime = classify_regime(reg_row, self.cfg)
                     ctx = ctx_key(regime)
@@ -1323,8 +1333,13 @@ class Bot:
                     if (now_utc() - self.last_time[symbol]).total_seconds()/60.0 < self.cfg.min_minutes_between_same_signal:
                         continue
 
-                qty_ref = volatility_target_size(self.ref_equity, float(row["atr_pct"]), price, self.cfg)
-                notional_ref = qty_ref * price
+                base_qty = volatility_target_size(self.ref_equity, float(row["atr_pct"]), price, self.cfg)
+                mkt = self.ex.x.market(symbol)
+                contract_size = float(mkt.get("contractSize") or 1)
+                contract_qty = base_qty / contract_size
+                contract_qty = float(self.ex.x.amount_to_precision(symbol, contract_qty))
+                base_qty = contract_qty * contract_size
+                notional_ref = base_qty * price
                 bal = self.ex.get_balance_usdt()
                 req_margin = notional_ref / self.cfg.leverage if self.cfg.leverage else notional_ref
                 if bal < req_margin:
@@ -1333,7 +1348,7 @@ class Bot:
                 risk = abs(price - sig.sl); reward = abs(sig.tp - price)
                 rr = round(reward / risk, 2) if risk > 0 else None
 
-                order = self.ex.create_demo_order(symbol, sig.side, qty_ref)
+                order = self.ex.create_demo_order(symbol, sig.side, contract_qty)
                 status_line = "🚀 Executed on OKX Demo" if order else "⚠️ Execution failed on OKX Demo"
                 msg = (
                     f"📢 [EVOLVE-COMMITTEE - {sig.model}] New Signal\n\n"
@@ -1345,14 +1360,14 @@ class Bot:
                     f"🛡 SL: {sig.sl:.4f} ({'-' if sig.sl < price else '+'}{pct(abs(sig.sl-price)/price)})\n"
                     f"📏 R:R = {rr if rr is not None else 'n/a'}\n\n"
                     f"🧠 Why: {sig.reason}\n"
-                    f"📦 SizeRef: ~{qty_ref:.6f} ({notional_ref:.2f} USDT)\n"
+                    f"📦 SizeRef: ~{base_qty:.6f} ({notional_ref:.2f} USDT)\n"
                     f"{status_line}"
                 )
                 self.notifier.send(msg)
                 self.last_alert_ts = time.time()
 
-                self.paper.log_signal(symbol, row, sig, qty_ref, notional_ref, rr, self.cfg, regime)
-                t = self.paper.open_virtual(symbol, price, sig, qty_ref, self.cfg)
+                self.paper.log_signal(symbol, row, sig, base_qty, notional_ref, rr, self.cfg, regime)
+                t = self.paper.open_virtual(symbol, price, sig, base_qty, self.cfg)
                 self.paper.ml_snapshot(t.id, symbol, row, regime)
 
                 self.last_key[symbol] = key
