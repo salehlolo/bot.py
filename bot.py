@@ -111,6 +111,8 @@ class Config:
     # Sizing (display only)
     risk_k: float = 0.01
     max_position_value_usd: float = 250.0
+    min_position_value_usd: float = 50.0
+    max_open_trades: int = 2
 
     # Filters
     funding_filter: bool = True
@@ -954,7 +956,7 @@ def volatility_target_size(equity_usdt: float, atr_pct: float, price: float, cfg
     if (atr_pct is None) or atr_pct <= 0 or price <= 0:
         return 0.0
     dollar_risk_unit = equity_usdt * cfg.risk_k
-    value = min(dollar_risk_unit / atr_pct, cfg.max_position_value_usd)
+    value = clamp(dollar_risk_unit / atr_pct, cfg.min_position_value_usd, cfg.max_position_value_usd)
     qty = value / price
     return max(qty, 0.0)
 
@@ -977,6 +979,9 @@ class Bot:
         self.last_key: Dict[str, Optional[str]] = {}
         self.last_time: Dict[str, Optional[dt.datetime]] = {}
         self.last_alert_ts: float = 0.0
+        self.closed_trades: List[PaperTrade] = []
+        self.last_hourly_report = now_utc()
+        self.last_daily_report_date = now_utc().date()
 
         # ==== إدارة المخاطر الإضافية (state) ====
         s = self.state.setdefault("risk", {})
@@ -1021,6 +1026,50 @@ class Bot:
             r["daily_stopped"] = True
             self._save_state()
             self.notifier.send(f"🛑 Daily Stop Triggered — صافي اليوم {r['daily_pnl']:.2f} USDT ≤ {limit:.2f}. إيقاف باقي اليوم.")
+
+    def _maybe_hourly_report(self):
+        now = now_utc()
+        if now - self.last_hourly_report >= dt.timedelta(hours=1):
+            since = self.last_hourly_report
+            trades = [t for t in self.closed_trades if pd.to_datetime(t.exit_time) >= since]
+            profit = sum((t.pnl_usd or 0) for t in trades if (t.pnl_usd or 0) > 0)
+            loss = sum((t.pnl_usd or 0) for t in trades if (t.pnl_usd or 0) < 0)
+            net = profit + loss
+            msg = (f"⏱ Hourly Report\n"
+                   f"Trades: {len(trades)}\n"
+                   f"Profit: {profit:.2f} USDT\n"
+                   f"Loss: {loss:.2f} USDT\n"
+                   f"Net: {net:.2f} USDT")
+            self.notifier.send(msg)
+            self.last_hourly_report = now
+            cutoff = now - dt.timedelta(days=1)
+            self.closed_trades = [t for t in self.closed_trades if pd.to_datetime(t.exit_time) >= cutoff]
+
+    def _send_daily_report(self, date: dt.date):
+        if not os.path.exists(self.cfg.trades_csv):
+            self.notifier.send(f"📅 Daily Report {date}: No trades")
+            return
+        df = pd.read_csv(self.cfg.trades_csv)
+        if df.empty:
+            msg = f"📅 Daily Report {date}\nNo trades"
+        else:
+            df['close_time'] = pd.to_datetime(df['close_time'])
+            day_df = df[df['close_time'].dt.date == date]
+            if day_df.empty:
+                msg = f"📅 Daily Report {date}\nNo trades"
+            else:
+                total = day_df['pnl_usd'].sum()
+                lines = [f"📅 Daily Report {date}", f"Total PnL: {total:.2f} USDT"]
+                for sym, val in day_df.groupby('symbol')['pnl_usd'].sum().items():
+                    lines.append(f"{sym}: {val:+.2f} USDT")
+                msg = "\n".join(lines)
+        self.notifier.send(msg)
+
+    def _maybe_daily_report(self):
+        today = now_utc().date()
+        if today != self.last_daily_report_date:
+            self._send_daily_report(self.last_daily_report_date)
+            self.last_daily_report_date = today
 
     # ==========================================
 
@@ -1139,6 +1188,7 @@ class Bot:
 
     def loop_once(self):
         # رولات اليوم
+        self._maybe_daily_report()
         self._daily_rollover_if_needed()
 
         base_universe = self.ex.get_top_symbols(self.cfg.top_n_symbols)
@@ -1174,8 +1224,9 @@ class Bot:
                             f"• Pair: {t.symbol} | TF: {t.timeframe}\n"
                             f"• Side: {t.side.upper()} | Model: {t.model}\n"
                             f"• Entry: {t.entry:.4f} → Exit: {t.exit_price:.4f}\n"
-                            f"• PnL: {t.pnl_usd:+.2f} USDT | Hold: {hold_s}s"
+                            f"• PnL: {t.pnl_usd:+.2f} USDT | Hold: {hold_s}s",
                         )
+                        self.closed_trades.append(t)
                     # حدث صافي اليوم
                     r = self.state.setdefault("risk", {})
                     r["daily_pnl"] = float(r.get("daily_pnl", 0.0)) + pnl_sum
@@ -1187,8 +1238,10 @@ class Bot:
             except Exception:
                 continue
 
+        self._maybe_hourly_report()
+
         # لو في صفقات مفتوحة — نكتفي بتتبع الإغلاق فقط
-        if len(self.paper.open) > 0:
+        if len(self.paper.open) >= self.cfg.max_open_trades:
             return
 
         # لا تدخل صفقات جديدة لو في وقف يومي
