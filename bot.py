@@ -113,6 +113,7 @@ class Config:
     max_position_value_usd: float = 50.0
     min_position_value_usd: float = 50.0
     max_open_trades: int = 2
+    leverage: int = 10
 
     # Filters
     funding_filter: bool = True
@@ -243,6 +244,7 @@ class FuturesExchange:
         # Determine account modes for proper order parameters
         self.pos_mode = "net"        # "net" أو "long_short"
         self.margin_mode = "cross"   # "cross" أو "isolated"
+        self.leverage = cfg.leverage
         try:
             info = self.x.privateGetAccountConfig()
             data = info.get("data", [])
@@ -262,31 +264,33 @@ class FuturesExchange:
 
         # Ensure (or set) account modes to avoid 51010
         try:
-            # نختار رمز سائل لضبط الرافعة عليه
             setup_symbol = next((s for s in self.x.symbols if s.endswith(":USDT")), "BTC/USDT:USDT")
             hedged = not self.pos_mode.startswith("net")
-            # حاول بالطريقة الموحدة (snake_case)
             try:
                 self.x.set_position_mode(hedged)
             except Exception:
-                # بديل raw camelCase
                 self.x.privatePostAccountSetPositionMode({
                     "posMode": "long_short_mode" if hedged else "net_mode"
                 })
-            # اضبط رافعة ومارجن مود على نفس الرمز
             try:
-                self.x.set_leverage(3, setup_symbol, {"mgnMode": self.margin_mode})
+                self.x.set_leverage(self.leverage, setup_symbol, {"mgnMode": self.margin_mode})
             except Exception:
                 m = self.x.market(setup_symbol)
                 self.x.privatePostAccountSetLeverage({
                     "instId": m["id"],
-                    "lever": "3",
+                    "lever": str(self.leverage),
                     "mgnMode": self.margin_mode,
                 })
         except Exception as e:
             msg = str(getattr(e, 'args', [''])[0])
             if "59000" in msg:
-                print("[WARN] ensure account modes skipped: close orders/positions before changing modes (code 59000)")
+                print("[WARN] ensure account modes retrying after flatten (code 59000)")
+                self.flatten_all()
+                try:
+                    self.x.set_position_mode(not self.pos_mode.startswith("net"))
+                    self.x.set_leverage(self.leverage, setup_symbol, {"mgnMode": self.margin_mode})
+                except Exception as e2:
+                    print("[WARN] ensure account modes failed:", e2)
             else:
                 print("[WARN] ensure account modes failed:", e)
 
@@ -314,14 +318,16 @@ class FuturesExchange:
     def get_balance_usdt(self) -> float:
         try:
             bal = self.x.fetch_balance(params={"type": "swap"})
-            return float(bal["total"].get("USDT", 0.0))
+            return float(bal["free"].get("USDT", 0.0))
         except Exception:
             return 0.0
 
-    def create_demo_order(self, symbol: str, side: str, amount: float):
-        params = {"tdMode": self.margin_mode}
+    def create_demo_order(self, symbol: str, side: str, amount: float, reduce_only: bool = False):
+        params = {"tdMode": self.margin_mode, "reduceOnly": reduce_only}
         if not self.pos_mode.startswith("net"):
             params["posSide"] = "long" if side.lower() == "buy" else "short"
+        if self.leverage:
+            params["lever"] = str(self.leverage)
         try:
             o = self.x.create_order(symbol, "market", side, amount, params=params)
             oid = o.get("id") or o.get("orderId") or o.get("info", {}).get("ordId")
@@ -332,6 +338,32 @@ class FuturesExchange:
         except Exception as e:
             print("[WARN] create_order failed:", e)
             return None
+
+    def close_demo_position(self, symbol: str, orig_side: str, amount: float):
+        opp = "sell" if orig_side.lower() == "buy" else "buy"
+        return self.create_demo_order(symbol, opp, amount, reduce_only=True)
+
+    def flatten_all(self):
+        try:
+            for s in self.x.symbols:
+                try:
+                    self.x.cancel_all_orders(s)
+                except Exception:
+                    continue
+            try:
+                positions = self.x.fetch_positions(params={"type": "swap"})
+                for p in positions:
+                    amt = abs(float(p.get("contracts") or p.get("positionAmt") or 0))
+                    if amt <= 0:
+                        continue
+                    sym = p.get("symbol") or p.get("info", {}).get("instId")
+                    side = p.get("side") or ("long" if float(p.get("contracts", 0)) > 0 else "short")
+                    orig = "buy" if side == "long" else "sell"
+                    self.close_demo_position(sym, orig, amt)
+            except Exception:
+                pass
+        except Exception as e:
+            print("[WARN] flatten failed:", e)
 
     def get_top_symbols(self, n: int = 50) -> List[str]:
         nowt = time.time()
@@ -739,6 +771,7 @@ class PaperTrade:
     sl: float
     tp: float
     model: str
+    qty: float
     status: str = "open"
     exit_price: Optional[float] = None
     exit_time: Optional[str] = None
@@ -774,10 +807,10 @@ class Paper:
 
     def _gen_id(self) -> str: return f"T{int(time.time()*1000)}"
 
-    def open_virtual(self, symbol: str, price: float, sig: Signal, cfg: Config) -> PaperTrade:
+    def open_virtual(self, symbol: str, price: float, sig: Signal, qty: float, cfg: Config) -> PaperTrade:
         t = PaperTrade(
             id=self._gen_id(), timestamp=fmt_ts(), symbol=symbol, timeframe=cfg.timeframe,
-            side=sig.side, entry=price, sl=float(sig.sl), tp=float(sig.tp), model=sig.model
+            side=sig.side, entry=price, sl=float(sig.sl), tp=float(sig.tp), model=sig.model, qty=qty
         )
         self.open[t.id] = t
         return t
@@ -803,8 +836,7 @@ class Paper:
             else:
                 continue
             t.status = "closed"; t.result = res; t.exit_price = float(px); t.exit_time = fmt_ts()
-            notional_ref = 100.0
-            qty = notional_ref / t.entry
+            qty = t.qty
             pnl = (t.exit_price - t.entry) * qty * (1 if t.side=="buy" else -1)
             t.pnl_usd = round(pnl,4)
             to_close.append(tid)
@@ -1213,6 +1245,8 @@ class Bot:
                 last = d.iloc[-1]
                 closed = self.paper.update_with_candle(symbol, float(last["high"]), float(last["low"]))
                 if closed:
+                    for t in closed:
+                        self.ex.close_demo_position(t.symbol, t.side, t.qty)
                     reg_row = d.iloc[-2] if len(d)>1 else last
                     regime = classify_regime(reg_row, self.cfg)
                     ctx = ctx_key(regime)
@@ -1292,8 +1326,9 @@ class Bot:
                 qty_ref = volatility_target_size(self.ref_equity, float(row["atr_pct"]), price, self.cfg)
                 notional_ref = qty_ref * price
                 bal = self.ex.get_balance_usdt()
-                if bal < notional_ref:
-                    print(f"[WARN] skipping {symbol}: need {notional_ref:.2f} USDT but only {bal:.2f} available")
+                req_margin = notional_ref / self.cfg.leverage if self.cfg.leverage else notional_ref
+                if bal < req_margin:
+                    print(f"[WARN] skipping {symbol}: need {req_margin:.2f} USDT but only {bal:.2f} available")
                     continue
                 risk = abs(price - sig.sl); reward = abs(sig.tp - price)
                 rr = round(reward / risk, 2) if risk > 0 else None
@@ -1317,7 +1352,7 @@ class Bot:
                 self.last_alert_ts = time.time()
 
                 self.paper.log_signal(symbol, row, sig, qty_ref, notional_ref, rr, self.cfg, regime)
-                t = self.paper.open_virtual(symbol, price, sig, self.cfg)
+                t = self.paper.open_virtual(symbol, price, sig, qty_ref, self.cfg)
                 self.paper.ml_snapshot(t.id, symbol, row, regime)
 
                 self.last_key[symbol] = key
