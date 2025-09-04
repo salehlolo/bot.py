@@ -30,6 +30,13 @@ import ta
 import requests
 
 # =========================
+# Constants
+# =========================
+
+TRADE_VALUE_USD = 50.0
+LEVERAGE = 10
+
+# =========================
 # Helpers
 # =========================
 
@@ -108,12 +115,8 @@ class Config:
     keltner_mult: float = 1.5
     squeeze_bb_mult: float = 1.6
 
-    # Sizing (display only)
-    risk_k: float = 0.01
-    max_position_value_usd: float = 50.0
-    min_position_value_usd: float = 50.0
+    # Sizing
     max_open_trades: int = 2
-    leverage: int = 10
 
     # Filters
     funding_filter: bool = True
@@ -244,7 +247,7 @@ class FuturesExchange:
         # Determine account modes for proper order parameters
         self.pos_mode = "net"        # "net" أو "long_short"
         self.margin_mode = "cross"   # "cross" أو "isolated"
-        self.leverage = cfg.leverage
+        self.leverage = LEVERAGE
         try:
             info = self.x.privateGetAccountConfig()
             data = info.get("data", [])
@@ -994,19 +997,6 @@ def in_quiet_window(cfg: Config) -> bool:
             return True
     return False
 
-def volatility_target_size(equity_usdt: float, atr_pct: float, price: float, cfg: Config) -> float:
-    if price <= 0:
-        return 0.0
-    if cfg.min_position_value_usd == cfg.max_position_value_usd:
-        value = cfg.min_position_value_usd
-    else:
-        if (atr_pct is None) or atr_pct <= 0:
-            return 0.0
-        dollar_risk_unit = equity_usdt * cfg.risk_k
-        value = clamp(dollar_risk_unit / atr_pct, cfg.min_position_value_usd, cfg.max_position_value_usd)
-    qty = value / price
-    return max(qty, 0.0)
-
 # =========================
 # Bot
 # =========================
@@ -1333,7 +1323,7 @@ class Bot:
                     if (now_utc() - self.last_time[symbol]).total_seconds()/60.0 < self.cfg.min_minutes_between_same_signal:
                         continue
 
-                base_qty = volatility_target_size(self.ref_equity, float(row["atr_pct"]), price, self.cfg)
+                base_qty = TRADE_VALUE_USD / price
                 mkt = self.ex.x.market(symbol)
                 contract_size = float(mkt.get("contractSize") or 1)
                 contract_qty = base_qty / contract_size
@@ -1341,7 +1331,7 @@ class Bot:
                 base_qty = contract_qty * contract_size
                 notional_ref = base_qty * price
                 bal = self.ex.get_balance_usdt()
-                req_margin = notional_ref / self.cfg.leverage if self.cfg.leverage else notional_ref
+                req_margin = notional_ref / LEVERAGE
                 if bal < req_margin:
                     print(f"[WARN] skipping {symbol}: need {req_margin:.2f} USDT but only {bal:.2f} available")
                     continue
