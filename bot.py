@@ -116,6 +116,10 @@ class Config:
     funding_filter: bool = True
     max_abs_funding: float = 0.003
 
+    # Account modes (override if auto-detect fails)
+    okx_pos_mode: Optional[str] = None   # "net_mode" or "long_short_mode"
+    okx_margin_mode: Optional[str] = None  # "cross" or "isolated"
+
     # Quiet windows (UTC HH:MM)
     event_quiet_minutes: int = 10
     quiet_windows_utc: Tuple[str, ...] = ()
@@ -222,6 +226,24 @@ class FuturesExchange:
         # Demo accounts cannot access the private currencies endpoint; disable it
         self.x.has["fetchCurrencies"] = False
         self.x.load_markets()
+
+        # Determine account modes for proper order parameters
+        self.pos_mode = "net_mode"
+        self.margin_mode = "cross"
+        try:
+            info = self.x.privateGetAccountConfig()
+            data = info.get("data", [])
+            if data:
+                cfg0 = data[0]
+                self.pos_mode = cfg0.get("posMode") or self.pos_mode
+                self.margin_mode = cfg0.get("marginMode") or cfg0.get("mgnMode") or self.margin_mode
+        except Exception as e:
+            print("[WARN] fetch account config failed:", e)
+        if cfg.okx_pos_mode:
+            self.pos_mode = cfg.okx_pos_mode
+        if cfg.okx_margin_mode:
+            self.margin_mode = cfg.okx_margin_mode
+
         self.cfg = cfg
         self._universe_cache: Dict[str, any] = {"ts": 0.0, "symbols": []}
         self._health_cache: Dict[str, float] = {}
@@ -251,7 +273,9 @@ class FuturesExchange:
             return 0.0
 
     def create_demo_order(self, symbol: str, side: str, amount: float):
-        params = {"tdMode": "cross", "posSide": "long" if side.lower() == "buy" else "short"}
+        params = {"tdMode": self.margin_mode}
+        if self.pos_mode != "net_mode":
+            params["posSide"] = "long" if side.lower() == "buy" else "short"
         try:
             o = self.x.create_order(symbol, "market", side, amount, params=params)
             oid = o.get("id") or o.get("orderId") or o.get("info", {}).get("ordId")
