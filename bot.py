@@ -228,21 +228,23 @@ class FuturesExchange:
         self.x.load_markets()
 
         # Determine account modes for proper order parameters
-        self.pos_mode = "net_mode"
+        self.pos_mode = "net"
         self.margin_mode = "cross"
         try:
             info = self.x.privateGetAccountConfig()
             data = info.get("data", [])
             if data:
                 cfg0 = data[0]
-                self.pos_mode = cfg0.get("posMode") or self.pos_mode
-                self.margin_mode = cfg0.get("marginMode") or cfg0.get("mgnMode") or self.margin_mode
+                pm = cfg0.get("posMode") or self.pos_mode
+                mm = cfg0.get("marginMode") or cfg0.get("mgnMode") or self.margin_mode
+                self.pos_mode = str(pm).replace("-", "_").lower()
+                self.margin_mode = str(mm).lower()
         except Exception as e:
             print("[WARN] fetch account config failed:", e)
         if cfg.okx_pos_mode:
-            self.pos_mode = cfg.okx_pos_mode
+            self.pos_mode = str(cfg.okx_pos_mode).replace("-", "_").lower()
         if cfg.okx_margin_mode:
-            self.margin_mode = cfg.okx_margin_mode
+            self.margin_mode = str(cfg.okx_margin_mode).lower()
 
         self.cfg = cfg
         self._universe_cache: Dict[str, any] = {"ts": 0.0, "symbols": []}
@@ -274,7 +276,7 @@ class FuturesExchange:
 
     def create_demo_order(self, symbol: str, side: str, amount: float):
         params = {"tdMode": self.margin_mode}
-        if self.pos_mode != "net_mode":
+        if not self.pos_mode.startswith("net"):
             params["posSide"] = "long" if side.lower() == "buy" else "short"
         try:
             o = self.x.create_order(symbol, "market", side, amount, params=params)
