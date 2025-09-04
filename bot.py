@@ -116,9 +116,6 @@ class Config:
     funding_filter: bool = True
     max_abs_funding: float = 0.003
 
-    # Account modes (override if auto-detect fails)
-    okx_pos_mode: Optional[str] = None   # "net_mode" or "long_short_mode"
-    okx_margin_mode: Optional[str] = None  # "cross" or "isolated"
 
     # Quiet windows (UTC HH:MM)
     event_quiet_minutes: int = 10
@@ -227,24 +224,22 @@ class FuturesExchange:
         self.x.has["fetchCurrencies"] = False
         self.x.load_markets()
 
-        # Determine account modes for proper order parameters
-        self.pos_mode = "net"
-        self.margin_mode = "cross"
+        # Quick demo setup: enforce net mode and cross margin with leverage 3
         try:
-            info = self.x.privateGetAccountConfig()
-            data = info.get("data", [])
-            if data:
-                cfg0 = data[0]
-                pm = cfg0.get("posMode") or self.pos_mode
-                mm = cfg0.get("marginMode") or cfg0.get("mgnMode") or self.margin_mode
-                self.pos_mode = str(pm).replace("-", "_").lower()
-                self.margin_mode = str(mm).lower()
+            try:
+                self.x.setPositionMode(False)
+            except Exception:
+                self.x.private_post_account_set_position_mode({"posMode": "net_mode"})
+            setup_symbol = "BTC/USDT:USDT"
+            m = self.x.market(setup_symbol)
+            try:
+                self.x.setLeverage(3, setup_symbol, {"mgnMode": "cross"})
+            except Exception:
+                self.x.private_post_account_set_leverage({
+                    "instId": m["id"], "lever": "3", "mgnMode": "cross"
+                })
         except Exception as e:
-            print("[WARN] fetch account config failed:", e)
-        if cfg.okx_pos_mode:
-            self.pos_mode = str(cfg.okx_pos_mode).replace("-", "_").lower()
-        if cfg.okx_margin_mode:
-            self.margin_mode = str(cfg.okx_margin_mode).lower()
+            print("[WARN] init account setup failed:", e)
 
         self.cfg = cfg
         self._universe_cache: Dict[str, any] = {"ts": 0.0, "symbols": []}
@@ -275,11 +270,8 @@ class FuturesExchange:
             return 0.0
 
     def create_demo_order(self, symbol: str, side: str, amount: float):
-        params = {"tdMode": self.margin_mode}
-        if not self.pos_mode.startswith("net"):
-            params["posSide"] = "long" if side.lower() == "buy" else "short"
         try:
-            o = self.x.create_order(symbol, "market", side, amount, params=params)
+            o = self.x.create_order(symbol, "market", side, amount, None, {"tdMode": "cross"})
             oid = o.get("id") or o.get("orderId") or o.get("info", {}).get("ordId")
             if not oid:
                 print("[WARN] create_order returned no id:", o)
