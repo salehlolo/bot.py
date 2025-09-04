@@ -116,6 +116,10 @@ class Config:
     funding_filter: bool = True
     max_abs_funding: float = 0.003
 
+    # Account modes (override if auto-detect fails)
+    okx_pos_mode: Optional[str] = None   # "net_mode" or "long_short_mode"
+    okx_margin_mode: Optional[str] = None  # "cross" or "isolated"
+
 
     # Quiet windows (UTC HH:MM)
     event_quiet_minutes: int = 10
@@ -219,27 +223,66 @@ class FuturesExchange:
             "timeout": 15000,
         })
         # Force all requests to hit the demo environment
-        self.x.set_sandbox_mode(True)
-        # Demo accounts cannot access the private currencies endpoint; disable it
-        self.x.has["fetchCurrencies"] = False
+        try:
+            self.x.set_sandbox_mode(True)
+        except Exception:
+            pass
+        # Demo accounts cannot access the private currencies endpoint; disable it (نغلق من الجهتين)
+        try:
+            self.x.options["fetchCurrencies"] = False
+        except Exception:
+            pass
+        try:
+            self.x.has["fetchCurrencies"] = False
+        except Exception:
+            pass
         self.x.load_markets()
 
-        # Quick demo setup: enforce net mode and cross margin with leverage 3
+        # Determine account modes for proper order parameters
+        self.pos_mode = "net"        # "net" أو "long_short"
+        self.margin_mode = "cross"   # "cross" أو "isolated"
         try:
+            info = self.x.privateGetAccountConfig()
+            data = info.get("data", [])
+            if data:
+                cfg0 = data[0]
+                pm = cfg0.get("posMode") or self.pos_mode
+                mm = cfg0.get("marginMode") or cfg0.get("mgnMode") or self.margin_mode
+                self.pos_mode = str(pm).replace("-", "_").lower()
+                self.margin_mode = str(mm).lower()
+        except Exception as e:
+            print("[WARN] fetch account config failed:", e)
+        # Manual overrides from config
+        if cfg.okx_pos_mode:
+            self.pos_mode = str(cfg.okx_pos_mode).replace("-", "_").lower()
+        if cfg.okx_margin_mode:
+            self.margin_mode = str(cfg.okx_margin_mode).lower()
+
+        # Ensure (or set) account modes to avoid 51010
+        try:
+            # نختار رمز سائل لضبط الرافعة عليه
+            setup_symbol = next((s for s in self.x.symbols if s.endswith(":USDT")), "BTC/USDT:USDT")
+            hedged = not self.pos_mode.startswith("net")
+            # حاول بالطريقة الموحدة (snake_case)
             try:
-                self.x.setPositionMode(False)
+                self.x.set_position_mode(hedged)
             except Exception:
-                self.x.private_post_account_set_position_mode({"posMode": "net_mode"})
-            setup_symbol = "BTC/USDT:USDT"
-            m = self.x.market(setup_symbol)
+                # بديل raw camelCase
+                self.x.privatePostAccountSetPositionMode({
+                    "posMode": "long_short_mode" if hedged else "net_mode"
+                })
+            # اضبط رافعة ومارجن مود على نفس الرمز
             try:
-                self.x.setLeverage(3, setup_symbol, {"mgnMode": "cross"})
+                self.x.set_leverage(3, setup_symbol, {"mgnMode": self.margin_mode})
             except Exception:
-                self.x.private_post_account_set_leverage({
-                    "instId": m["id"], "lever": "3", "mgnMode": "cross"
+                m = self.x.market(setup_symbol)
+                self.x.privatePostAccountSetLeverage({
+                    "instId": m["id"],
+                    "lever": "3",
+                    "mgnMode": self.margin_mode,
                 })
         except Exception as e:
-            print("[WARN] init account setup failed:", e)
+            print("[WARN] ensure account modes failed:", e)
 
         self.cfg = cfg
         self._universe_cache: Dict[str, any] = {"ts": 0.0, "symbols": []}
@@ -270,8 +313,11 @@ class FuturesExchange:
             return 0.0
 
     def create_demo_order(self, symbol: str, side: str, amount: float):
+        params = {"tdMode": self.margin_mode}
+        if not self.pos_mode.startswith("net"):
+            params["posSide"] = "long" if side.lower() == "buy" else "short"
         try:
-            o = self.x.create_order(symbol, "market", side, amount, None, {"tdMode": "cross"})
+            o = self.x.create_order(symbol, "market", side, amount, params=params)
             oid = o.get("id") or o.get("orderId") or o.get("info", {}).get("ordId")
             if not oid:
                 print("[WARN] create_order returned no id:", o)
@@ -299,9 +345,9 @@ class FuturesExchange:
                     qv = float(t.get("info", {}).get("quoteVolume", 0) or 0)
                 top.append((sym, float(qv)))
             top.sort(key=lambda x: x[1], reverse=True)
-            syms = [s for s,_ in top[:n]] or ["BTC/USDT","ETH/USDT"]
+            syms = [s for s,_ in top[:n]] or ["BTC/USDT:USDT","ETH/USDT:USDT"]
         except Exception:
-            syms = ["BTC/USDT","ETH/USDT"]
+            syms = ["BTC/USDT:USDT","ETH/USDT:USDT"]
         self._universe_cache = {"ts": nowt, "symbols": syms}
         return syms
 
@@ -325,7 +371,7 @@ class FuturesExchange:
                 self._bad_cache[s] = nowt
             time.sleep(0.05)
         if not ok:
-            ok = ["BTC/USDT","ETH/USDT"]
+            ok = ["BTC/USDT:USDT","ETH/USDT:USDT"]
         return ok
 
 # =========================
@@ -1243,7 +1289,12 @@ def parse_args() -> Config:
 
 def main():
     cfg = parse_args()
-    print("Config:\n", json.dumps(asdict(cfg), indent=2, default=str))
+    # إخفاء توكن التيليجرام في الطباعة
+    _cfg = asdict(cfg)
+    if _cfg.get("telegram_token"):
+        _tok = _cfg["telegram_token"]
+        _cfg["telegram_token"] = (_tok[:4] + "…" + _tok[-4:]) if len(_tok) > 8 else "****"
+    print("Config:\n", json.dumps(_cfg, indent=2, default=str))
     bot = Bot(cfg)
     bot.run()
 
